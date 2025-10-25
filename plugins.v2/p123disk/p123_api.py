@@ -29,6 +29,32 @@ class P123Api:
         self.client = client
         self._disk_name = disk_name
 
+    def _create_upload_client(self) -> httpx.Client:
+        """
+        创建专用于上传的HTTP客户端
+        
+        配置说明：
+        - keepalive_expiry=300: 5分钟keep-alive，避免上传大文件时连接过期
+        - timeout: 设置较长的超时时间以适应大文件上传
+        - verify=False: 禁用SSL验证
+        
+        :return: httpx.Client实例
+        """
+        return httpx.Client(
+            limits=httpx.Limits(
+                max_connections=10, 
+                max_keepalive_connections=5, 
+                keepalive_expiry=300  # 5分钟keep-alive
+            ),
+            timeout=httpx.Timeout(
+                connect=30.0,  # 连接超时30秒
+                read=300.0,    # 读取超时5分钟
+                write=300.0,   # 写入超时5分钟
+                pool=10.0      # 连接池超时10秒
+            ),
+            verify=False,  # 禁用SSL验证
+        )
+
     def _path_to_id(self, path: str):
         """
         通过路径获取ID
@@ -429,6 +455,8 @@ class P123Api:
             logger.error(f"【123】{target_name} 秒传出现未知错误：{e}")
             return None
 
+        # 初始化upload_client为None，用于异常处理时的安全清理
+        upload_client = None
         try:
             # 上传信息
             upload_data = resp["data"]
@@ -436,27 +464,7 @@ class P123Api:
             slice_size = int(upload_data["SliceSize"])
 
             # 创建专用于上传的HTTP客户端，避免连接池污染和keep-alive超时问题
-            upload_client = httpx.Client(
-                limits=httpx.Limits(
-                    max_connections=10, 
-                    max_keepalive_connections=5, 
-                    keepalive_expiry=300  # 设置5分钟keep-alive，避免上传大文件时连接过期
-                ),
-                timeout=httpx.Timeout(
-                    connect=30.0,  # 连接超时30秒
-                    read=300.0,    # 读取超时5分钟
-                    write=300.0,   # 写入超时5分钟
-                    pool=10.0      # 连接池超时10秒
-                ),
-                verify=False,  # 禁用SSL验证
-            )
-
-            upload_request_kwargs = {
-                "method": "PUT",
-                "headers": {"authorization": ""},
-                "parse": ...,
-                "timeout": 300,  # 设置5分钟超时
-            }
+            upload_client = self._create_upload_client()
 
             if file_size > slice_size:
                 # 大文件分块上传
@@ -472,6 +480,13 @@ class P123Api:
                     for chunk in iter(lambda: f.read(slice_size), b""):
                         if global_vars.is_transfer_stopped(local_path.as_posix()):
                             logger.info(f"【123】{local_path} 上传已取消！")
+                            # 关闭上传客户端
+                            try:
+                                if upload_client:
+                                    upload_client.close()
+                                    logger.debug(f"【123】上传客户端已关闭（取消时）")
+                            except:
+                                pass
                             return None
 
                         if not chunk:
@@ -526,20 +541,7 @@ class P123Api:
                                             upload_client.close()
                                         except:
                                             pass
-                                        upload_client = httpx.Client(
-                                            limits=httpx.Limits(
-                                                max_connections=10, 
-                                                max_keepalive_connections=5, 
-                                                keepalive_expiry=300
-                                            ),
-                                            timeout=httpx.Timeout(
-                                                connect=30.0,
-                                                read=300.0,
-                                                write=300.0,
-                                                pool=10.0
-                                            ),
-                                            verify=False,
-                                        )
+                                        upload_client = self._create_upload_client()
                                     
                                     time.sleep(15)  # 等待15秒后重试
                                     
@@ -613,20 +615,7 @@ class P123Api:
                                     upload_client.close()
                                 except:
                                     pass
-                                upload_client = httpx.Client(
-                                    limits=httpx.Limits(
-                                        max_connections=10, 
-                                        max_keepalive_connections=5, 
-                                        keepalive_expiry=300
-                                    ),
-                                    timeout=httpx.Timeout(
-                                        connect=30.0,
-                                        read=300.0,
-                                        write=300.0,
-                                        pool=10.0
-                                    ),
-                                    verify=False,
-                                )
+                                upload_client = self._create_upload_client()
                             
                             time.sleep(15)  # 等待15秒后重试
                             
@@ -677,10 +666,11 @@ class P123Api:
             )
         except Exception as e:
             logger.error(f"【123】{target_name} 上传出现未知错误：{e}")
-            # 确保在异常时也关闭上传客户端
+            # 确保在异常时也关闭上传客户端（如果已创建）
             try:
-                upload_client.close()
-                logger.debug(f"【123】上传客户端已关闭（异常时）")
+                if upload_client is not None:
+                    upload_client.close()
+                    logger.debug(f"【123】上传客户端已关闭（异常时）")
             except:
                 pass
             return None
