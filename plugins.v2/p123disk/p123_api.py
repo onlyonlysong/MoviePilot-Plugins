@@ -5,6 +5,7 @@ from typing import Optional, List, Dict
 from hashlib import md5
 from datetime import datetime
 
+import httpx
 import pytz
 import requests
 from p123client import P123Client, check_response
@@ -434,6 +435,22 @@ class P123Api:
             # 分块大小
             slice_size = int(upload_data["SliceSize"])
 
+            # 创建专用于上传的HTTP客户端，避免连接池污染和keep-alive超时问题
+            upload_client = httpx.Client(
+                limits=httpx.Limits(
+                    max_connections=10, 
+                    max_keepalive_connections=5, 
+                    keepalive_expiry=300  # 设置5分钟keep-alive，避免上传大文件时连接过期
+                ),
+                timeout=httpx.Timeout(
+                    connect=30.0,  # 连接超时30秒
+                    read=300.0,    # 读取超时5分钟
+                    write=300.0,   # 写入超时5分钟
+                    pool=10.0      # 连接池超时10秒
+                ),
+                verify=False,  # 禁用SSL验证
+            )
+
             upload_request_kwargs = {
                 "method": "PUT",
                 "headers": {"authorization": ""},
@@ -475,7 +492,7 @@ class P123Api:
                         )
                         logger.debug(f"{upload_url_resp} {upload_data}")
 
-                        # 上传分片，失败时重试5次，每次重新获取上传URL
+                        # 上传分片，失败时重试6次，每次重新获取上传URL并重建连接
                         max_retries = 6
                         retry_count = 0
                         upload_success = False
@@ -483,19 +500,48 @@ class P123Api:
                         
                         while retry_count < max_retries and not upload_success:
                             try:
-                                self.client.request(
-                                    current_upload_url_resp["data"]["presignedUrls"][str(slice_no)],
-                                    data=chunk,
-                                    **upload_request_kwargs,
+                                # 使用独立的httpx客户端进行上传
+                                upload_url = current_upload_url_resp["data"]["presignedUrls"][str(slice_no)]
+                                response = upload_client.put(
+                                    upload_url,
+                                    content=chunk,
+                                    headers={"authorization": ""},
                                 )
+                                response.raise_for_status()
                                 upload_success = True
                             except Exception as upload_err:
                                 retry_count += 1
+                                error_msg = str(upload_err)
+                                is_ssl_error = "SSL" in error_msg or "EOF" in error_msg
+                                
                                 if retry_count < max_retries:
                                     logger.warning(
                                         f"【123】{target_name} 分片 {slice_no} 上传失败，正在重试 ({retry_count}/{max_retries}): {upload_err}"
                                     )
-                                    time.sleep(10)  # 等待10秒后重试
+                                    
+                                    # 如果是SSL错误，关闭并重建客户端以清理损坏的连接
+                                    if is_ssl_error:
+                                        logger.info(f"【123】检测到SSL错误，重建上传客户端以清理连接")
+                                        try:
+                                            upload_client.close()
+                                        except:
+                                            pass
+                                        upload_client = httpx.Client(
+                                            limits=httpx.Limits(
+                                                max_connections=10, 
+                                                max_keepalive_connections=5, 
+                                                keepalive_expiry=300
+                                            ),
+                                            timeout=httpx.Timeout(
+                                                connect=30.0,
+                                                read=300.0,
+                                                write=300.0,
+                                                pool=10.0
+                                            ),
+                                            verify=False,
+                                        )
+                                    
+                                    time.sleep(15)  # 等待15秒后重试
                                     
                                     # 重新获取上传URL
                                     try:
@@ -530,7 +576,7 @@ class P123Api:
                 )
                 check_response(resp)
                 
-                # 上传文件，失败时重试6次，每次重新获取上传URL
+                # 上传文件，失败时重试6次，每次重新获取上传URL并重建连接
                 max_retries = 6
                 retry_count = 0
                 upload_success = False
@@ -541,19 +587,48 @@ class P123Api:
                     
                 while retry_count < max_retries and not upload_success:
                     try:
-                        self.client.request(
-                            current_resp["data"]["presignedUrls"]["1"],
-                            data=file_data,
-                            **upload_request_kwargs,
+                        # 使用独立的httpx客户端进行上传
+                        upload_url = current_resp["data"]["presignedUrls"]["1"]
+                        response = upload_client.put(
+                            upload_url,
+                            content=file_data,
+                            headers={"authorization": ""},
                         )
+                        response.raise_for_status()
                         upload_success = True
                     except Exception as upload_err:
                         retry_count += 1
+                        error_msg = str(upload_err)
+                        is_ssl_error = "SSL" in error_msg or "EOF" in error_msg
+                        
                         if retry_count < max_retries:
                             logger.warning(
                                 f"【123】{target_name} 上传失败，正在重试 ({retry_count}/{max_retries}): {upload_err}"
                             )
-                            time.sleep(10)  # 等待10秒后重试
+                            
+                            # 如果是SSL错误，关闭并重建客户端以清理损坏的连接
+                            if is_ssl_error:
+                                logger.info(f"【123】检测到SSL错误，重建上传客户端以清理连接")
+                                try:
+                                    upload_client.close()
+                                except:
+                                    pass
+                                upload_client = httpx.Client(
+                                    limits=httpx.Limits(
+                                        max_connections=10, 
+                                        max_keepalive_connections=5, 
+                                        keepalive_expiry=300
+                                    ),
+                                    timeout=httpx.Timeout(
+                                        connect=30.0,
+                                        read=300.0,
+                                        write=300.0,
+                                        pool=10.0
+                                    ),
+                                    verify=False,
+                                )
+                            
+                            time.sleep(15)  # 等待15秒后重试
                             
                             # 重新获取上传URL
                             try:
@@ -578,6 +653,14 @@ class P123Api:
             check_response(complete_resp)
 
             data = complete_resp.get("data", {}).get("file_info", None)
+            
+            # 上传完成，关闭专用上传客户端
+            try:
+                upload_client.close()
+                logger.debug(f"【123】上传客户端已关闭")
+            except Exception as close_err:
+                logger.debug(f"【123】关闭上传客户端时出错: {close_err}")
+            
             return schemas.FileItem(
                 storage=self._disk_name,
                 fileid=str(data["FileId"]),
@@ -594,6 +677,12 @@ class P123Api:
             )
         except Exception as e:
             logger.error(f"【123】{target_name} 上传出现未知错误：{e}")
+            # 确保在异常时也关闭上传客户端
+            try:
+                upload_client.close()
+                logger.debug(f"【123】上传客户端已关闭（异常时）")
+            except:
+                pass
             return None
 
     def detail(self, fileitem: schemas.FileItem) -> Optional[schemas.FileItem]:
