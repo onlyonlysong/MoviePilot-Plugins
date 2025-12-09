@@ -489,6 +489,12 @@ class P123Api:
                                 )
                                 upload_success = True
                             except Exception as upload_err:
+                                # 遇到SSL错误时尝试关闭验证
+                                if "SSLError" in str(type(upload_err)) or "SSLError" in str(upload_err) or "certificate verify failed" in str(upload_err):
+                                    if upload_request_kwargs.get("verify") is not False:
+                                        logger.warning(f"【123】检测到SSL错误，尝试关闭SSL验证重试: {upload_err}")
+                                        upload_request_kwargs["verify"] = False
+
                                 retry_count += 1
                                 if retry_count < max_retries:
                                     logger.warning(
@@ -547,6 +553,12 @@ class P123Api:
                         )
                         upload_success = True
                     except Exception as upload_err:
+                        # 遇到SSL错误时尝试关闭验证
+                        if "SSLError" in str(type(upload_err)) or "SSLError" in str(upload_err) or "certificate verify failed" in str(upload_err):
+                            if upload_request_kwargs.get("verify") is not False:
+                                logger.warning(f"【123】检测到SSL错误，尝试关闭SSL验证重试: {upload_err}")
+                                upload_request_kwargs["verify"] = False
+
                         retry_count += 1
                         if retry_count < max_retries:
                             logger.warning(
