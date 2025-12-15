@@ -102,9 +102,11 @@ class ShareStrmHelper:
             )
 
         def _scrape_media_data(file_path: Path) -> None:
+            logger.info(f"【分享STRM生成】{file_path.as_posix()} 开始刮削...")
             media_scrape_metadata(file_path.as_posix())
 
         def _scrape_and_refresh(file_path: Path) -> None:
+            logger.info(f"【分享STRM生成】{file_path.as_posix()} 开始刮削...")
             _scrape_media_data(file_path)
             _refresh_media_server(file_path)
 
@@ -166,7 +168,7 @@ class ShareStrmHelper:
         )
         file_target_dir = file_path.parent
         original_file_name = file_path.name
-        file_name = file_path.stem + ".strm"
+        file_name = StrmGenerater.get_strm_filename(file_path)
         new_file_path = file_target_dir / file_name
 
         try:

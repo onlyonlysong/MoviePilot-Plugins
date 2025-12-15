@@ -20,6 +20,7 @@ from .core.config import configer
 from .core.cache import idpathcacher, DirectoryCache
 from .core.aliyunpan import AliyunPanLogin
 from .core.p115 import get_pid_by_path
+from .helper.strm import ApiSyncStrmHelper
 from .schemas.offline import (
     OfflineTasksPayload,
     AddOfflineTaskPayload,
@@ -42,8 +43,9 @@ from .schemas.u115 import (
     StorageInfo,
 )
 from .schemas.plugin import PluginStatusData
-from .schemas.base import ApiResponse
+from .schemas.api import ApiResponse
 from .schemas.share import ShareApiData, ShareResponseData, ShareSaveParent
+from .schemas.strm_api import StrmApiPayloadData, StrmApiPayloadByPathData
 from .utils.sentry import sentry_manager
 from .utils.oopserver import OOPServerHelper
 
@@ -515,7 +517,7 @@ class Api:
         )
 
     @staticmethod
-    def redirect_url(
+    def _redirect_url_impl(
         request: Request,
         pickcode: str = "",
         file_name: str = "",
@@ -524,7 +526,7 @@ class Api:
         receive_code: str = "",
     ) -> Response:
         """
-        115 网盘 302 跳转
+        115 网盘 302 跳转实现
         """
         user_agent = request.headers.get("User-Agent") or b""
         logger.debug(f"【302跳转服务】获取到客户端UA: {user_agent}")
@@ -604,6 +606,54 @@ class Api:
             },
             media_type="application/json; charset=utf-8",
             content=dumps({"status": "redirecting", "url": url}),
+        )
+
+    @staticmethod
+    def redirect_url_get(
+        request: Request,
+        pickcode: str = "",
+        file_name: str = "",
+        id: int = 0,
+        share_code: str = "",
+        receive_code: str = "",
+    ) -> Response:
+        """
+        115 网盘 302 跳转 (GET)
+        """
+        return Api._redirect_url_impl(
+            request, pickcode, file_name, id, share_code, receive_code
+        )
+
+    @staticmethod
+    def redirect_url_post(
+        request: Request,
+        pickcode: str = "",
+        file_name: str = "",
+        id: int = 0,
+        share_code: str = "",
+        receive_code: str = "",
+    ) -> Response:
+        """
+        115 网盘 302 跳转 (POST)
+        """
+        return Api._redirect_url_impl(
+            request, pickcode, file_name, id, share_code, receive_code
+        )
+
+    @staticmethod
+    def redirect_url_head(
+        request: Request,
+        pickcode: str = "",
+        file_name: str = "",
+        id: int = 0,
+        share_code: str = "",
+        receive_code: str = "",
+    ) -> Response:
+        """
+        115 网盘 302 跳转 (HEAD)
+        """
+        return Api._redirect_url_impl(
+            request, pickcode, file_name, id, share_code, receive_code
         )
 
     @staticmethod
@@ -769,3 +819,21 @@ class Api:
         判断是否有权限使用此增强功能
         """
         return OOPServerHelper.check_feature(name)
+
+    def api_strm_sync_creata(self, payload: StrmApiPayloadData) -> ApiResponse:
+        """
+        API 请求生成 STRM
+        """
+        strm_helper = ApiSyncStrmHelper(client=self._client)
+        code, msg, data = strm_helper.generate_strm_files(payload)
+        return ApiResponse(code=code, msg=msg, data=data)
+
+    def api_strm_sync_create_by_path(
+        self, payload: StrmApiPayloadByPathData
+    ) -> ApiResponse:
+        """
+        API 请求生成 STRM（by_path）
+        """
+        strm_helper = ApiSyncStrmHelper(client=self._client)
+        code, msg, data = strm_helper.generate_strm_paths(payload)
+        return ApiResponse(code=code, msg=msg, data=data)

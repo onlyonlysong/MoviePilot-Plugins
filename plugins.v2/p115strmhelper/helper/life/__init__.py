@@ -356,7 +356,7 @@ class MonitorLife:
                         )
                         file_target_dir = file_path.parent
                         original_file_name = file_path.name
-                        file_name = file_path.stem + ".strm"
+                        file_name = StrmGenerater.get_strm_filename(file_path)
                         new_file_path = file_target_dir / file_name
 
                         if configer.get_config(
@@ -484,9 +484,10 @@ class MonitorLife:
                     ] += mediainfo_count
                     self._schedule_notification()
         else:
+            file_path_string = file_path.as_posix()
             _databasehelper.upsert_batch(
                 _databasehelper.process_life_file_item(
-                    event=event, file_path=file_path.as_posix()
+                    event=event, file_path=file_path_string
                 )
             )
             if "creata" in configer.get_config("monitor_life_event_modes"):  # pylint: disable=E1135
@@ -496,7 +497,7 @@ class MonitorLife:
                 )
                 file_target_dir = file_path.parent
                 original_file_name = file_path.name
-                file_name = file_path.stem + ".strm"
+                file_name = StrmGenerater.get_strm_filename(file_path)
                 new_file_path = file_target_dir / file_name
 
                 if configer.get_config("monitor_life_auto_download_mediainfo_enabled"):
@@ -579,7 +580,7 @@ class MonitorLife:
                     return
 
                 strm_url = _get_url.get_strm_url(
-                    pickcode, original_file_name, file_path=file_path.as_posix()
+                    pickcode, original_file_name, file_path=file_path_string
                 )
 
                 with open(new_file_path, "w", encoding="utf-8") as file:
@@ -710,7 +711,7 @@ class MonitorLife:
         file_path = Path(target_dir) / Path(file_path).relative_to(pan_media_dir)
         if file_path.suffix.lower() in self.rmt_mediaext_set:
             file_target_dir = file_path.parent
-            file_name = file_path.stem + ".strm"
+            file_name = StrmGenerater.get_strm_filename(file_path)
             file_path = file_target_dir / file_name
         logger.info(
             f"【监控生活事件】删除本地{'文件夹' if file_category == 0 else '文件'}: {file_path}"

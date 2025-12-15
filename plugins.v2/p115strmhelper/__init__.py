@@ -36,6 +36,7 @@ from .helper.strm import FullSyncStrmHelper, TransferStrmHelper
 from .helper.share import U115_SHARE_URL_MATCH, ALIYUN_SHARE_URL_MATCH
 from .utils.path import PathUtils
 from .utils.sentry import sentry_manager
+from .utils.strm import StrmGenerater
 
 
 # 实例化一个该插件专用的 SessionManager
@@ -242,10 +243,38 @@ class P115StrmHelper(_PluginBase):
         return [
             {
                 "path": "/redirect_url",
-                "endpoint": self.api.redirect_url,
-                "methods": ["GET", "POST", "HEAD"],
+                "endpoint": self.api.redirect_url_get,
+                "methods": ["GET"],
                 "summary": "302跳转",
                 "description": "115网盘302跳转",
+            },
+            {
+                "path": "/redirect_url",
+                "endpoint": self.api.redirect_url_post,
+                "methods": ["POST"],
+                "summary": "302跳转",
+                "description": "115网盘302跳转",
+            },
+            {
+                "path": "/redirect_url",
+                "endpoint": self.api.redirect_url_head,
+                "methods": ["HEAD"],
+                "summary": "302跳转",
+                "description": "115网盘302跳转",
+            },
+            {
+                "path": "/api_strm_sync_creata",
+                "endpoint": self.api.api_strm_sync_creata,
+                "methods": ["POST"],
+                "summary": "API 请求生成 STRM",
+                "description": "API 请求生成 STRM",
+            },
+            {
+                "path": "/api_strm_sync_create_by_path",
+                "endpoint": self.api.api_strm_sync_create_by_path,
+                "methods": ["POST"],
+                "summary": "API 请求生成 STRM（通过一组文件夹路径）",
+                "description": "API 请求生成 STRM（通过一组文件夹路径）",
             },
             {
                 "path": "/add_transfer_share",
@@ -985,12 +1014,22 @@ class P115StrmHelper(_PluginBase):
                 return
             if fileitem.name != file_item[0]:
                 # 文件名称不一致，表明网盘文件被重命名，需要将本地文件重命名
-                target_file_path = Path(file_item[1]) / Path(
-                    target_path / fileitem.name
-                ).relative_to(file_item[2]).with_suffix(".strm")
-                life_path = Path(file_item[1]) / Path(
-                    target_path / file_item[0]
-                ).relative_to(file_item[2]).with_suffix(".strm")
+                target_path_obj = Path(target_path / fileitem.name).relative_to(
+                    file_item[2]
+                )
+                target_file_path = (
+                    Path(file_item[1])
+                    / target_path_obj.parent
+                    / StrmGenerater.get_strm_filename(target_path_obj)
+                )
+                life_path_obj = Path(target_path / file_item[0]).relative_to(
+                    file_item[2]
+                )
+                life_path = (
+                    Path(file_item[1])
+                    / life_path_obj.parent
+                    / StrmGenerater.get_strm_filename(life_path_obj)
+                )
                 # 如果重命名后的文件存在，先删除再重命名
                 try:
                     if target_file_path.exists():
