@@ -346,16 +346,17 @@
             "v0.0.1": "测试版本，切勿使用"
         }
     },
-       "P115Disk": {
+    "P115Disk": {
         "name": "115网盘储存",
         "description": "更快更强的115网盘存储模块。",
         "labels": "云盘",
-        "version": "0.1.4",
+        "version": "0.1.5",
         "release": true,
         "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
         "author": "DDSRem",
         "level": 1,
         "history": {
+            "v0.1.5": "上传和下载模块使用 Cookie 接口实现（暂时不支持上传增强）",
             "v0.1.4": "增加速度限制，降低风控风险",
             "v0.1.3": "优化错误处理逻辑，降低风控风险（升级后建议清除缓存再使用）",
             "v0.1.2": "修复文件夹 pick_code 异常",
