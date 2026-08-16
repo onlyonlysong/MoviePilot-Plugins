@@ -3,6 +3,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, List, Dict, Tuple, Optional
 from pathlib import Path
+from threading import Lock
+from urllib.parse import quote
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -11,6 +13,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 import requests
 from cachetools import cached, TTLCache
+from cachetools.keys import hashkey
 from p123client import check_response
 from p123client.tool import iterdir, share_iterdir
 
@@ -269,9 +272,10 @@ class FullSyncStrmHelper:
 
                         strm_url = (
                             f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url"
-                            f"?apikey={settings.API_TOKEN}&name={item['FileName']}"
+                            f"?apikey={settings.API_TOKEN}&name={quote(item['FileName'])}"
                             f"&size={item['Size']}&md5={item['Etag']}"
-                            f"&s3_key_flag={item['S3KeyFlag']}"
+                            f"&s3_key_flag={quote(item['S3KeyFlag'])}"
+                            f"&file_id={item['FileId']}"
                         )
 
                         with open(new_file_path, "w", encoding="utf-8") as file:
@@ -370,6 +374,10 @@ class ShareStrmHelper:
         """
         获取分享文件，生成 STRM
         """
+        logger.warning(
+            "【分享STRM生成】分享文件不在本账号网盘中，生成的 STRM 无法直接播放，"
+            "需先将分享转存到本账号网盘再使用全量同步生成 STRM"
+        )
         for item in share_iterdir(
             client=self.client,
             share_key=share_code,
@@ -422,11 +430,12 @@ class ShareStrmHelper:
 
                 new_file_path.parent.mkdir(parents=True, exist_ok=True)
 
+                # 分享文件的 FileId 属于分享者网盘，本账号下查不到，写入反而可能命中同 ID 的其他文件
                 strm_url = (
                     f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url"
-                    f"?apikey={settings.API_TOKEN}&name={item['FileName']}"
+                    f"?apikey={settings.API_TOKEN}&name={quote(item['FileName'])}"
                     f"&size={item['Size']}&md5={item['Etag']}"
-                    f"&s3_key_flag={item['S3KeyFlag']}"
+                    f"&s3_key_flag={quote(item['S3KeyFlag'])}"
                 )
 
                 with open(new_file_path, "w", encoding="utf-8") as file:
@@ -477,7 +486,7 @@ class P123StrmHelper(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/DDSRem-Dev/MoviePilot-Plugins/main/icons/P123Disk.png"
     # 插件版本
-    plugin_version = "1.1.6"
+    plugin_version = "1.1.7"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -668,11 +677,8 @@ class P123StrmHelper(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         """
         BASE_URL: {server_url}/api/v1/plugin/P123StrmHelper/redirect_url?apikey={APIKEY}
-        0. 查询带 s3_key_flag
-            url: ${BASE_URL}&name={name}&size={size}&md5={md5}&s3_key_flag={s3_key_flag}
-        1. 查询不带 s3_key_flag
-           会尝试先秒传到你的网盘的 "/我的秒传" 目录下，名字为 f"{md5}-{size}" 的文件，然后再获取下载链接
-            url: ${BASE_URL}&name={name}&size={size}&md5={md5}
+        file_id 为必需参数，且文件必须存在于本账号网盘中
+            url: ${BASE_URL}&name={name}&size={size}&md5={md5}&s3_key_flag={s3_key_flag}&file_id={file_id}
         """
         return [
             {
@@ -1624,7 +1630,51 @@ class P123StrmHelper(_PluginBase):
 
         logger.info(f"【媒体刮削】{item_name} 刮削元数据完成")
 
-    @cached(cache=TTLCache(maxsize=1, ttl=2 * 60))
+    @cached(
+        cache=TTLCache(maxsize=1024, ttl=10 * 60),
+        key=lambda self, name, size, md5, s3_key_flag, file_id, user_agent: hashkey(
+            file_id, md5, size, s3_key_flag, user_agent
+        ),
+        lock=Lock(),
+    )
+    def fetch_download_url(
+        self,
+        name: str,
+        size: int,
+        md5: str,
+        s3_key_flag: str,
+        file_id: int,
+        user_agent: str,
+    ) -> str:
+        """
+        获取 123 云盘文件直链
+
+        :param name (str): 文件名
+        :param size (int): 文件大小
+        :param md5 (str): 文件 MD5
+        :param s3_key_flag (str): 文件 S3KeyFlag
+        :param file_id (int): 网盘文件 ID
+        :param user_agent (str): 客户端 UA，直链与 UA 绑定
+
+        :return str: 直链地址
+        """
+        payload = {
+            "FileID": file_id,
+            "FileName": name,
+            "Etag": md5,
+            "Size": size,
+        }
+        if s3_key_flag:
+            payload["S3KeyFlag"] = s3_key_flag
+        resp = self._client.download_info(
+            payload,
+            base_url="",
+            async_=False,
+            headers={"User-Agent": user_agent},
+        )
+        check_response(resp)
+        return resp["data"]["DownloadUrl"]
+
     def redirect_url(
         self,
         request: Request,
@@ -1632,55 +1682,47 @@ class P123StrmHelper(_PluginBase):
         size: int = 0,
         md5: str = "",
         s3_key_flag: str = "",
+        file_id: int = 0,
     ):
         """
         123云盘302跳转
         """
-        if not s3_key_flag:
-            try:
-                resp = self._client.fs_mkdir("我的秒传")
-                check_response(resp)
-                resp = self._client.upload_file_fast(
-                    file_md5=md5,
-                    file_name=f"{md5}-{size}",
-                    file_size=size,
-                    parent_id=resp["data"]["Info"]["FileId"],
-                    duplicate=2,
-                )
-                check_response(resp)
-                payload = resp["data"]["Info"]
-                logger.info(
-                    f"【302跳转服务】转存 {name} 文件成功: {payload['S3KeyFlag']}"
-                )
-            except Exception as e:
-                logger.error(f"【302跳转服务】转存 {name} 文件失败: {e}")
-                return JSONResponse(
-                    {"state": False, "message": f"转存 {name} 文件失败: {e}"}, 500
-                )
-        else:
-            payload = {
-                "S3KeyFlag": s3_key_flag,
-                "FileName": name,
-                "Etag": md5,
-                "Size": size,
-            }
+        if not file_id:
+            logger.error(
+                f"【302跳转服务】{name} 链接未携带 file_id，请重新生成 STRM 文件；"
+                "分享来源的 STRM 需先将文件转存到本账号网盘后再生成"
+            )
+            return JSONResponse(
+                {
+                    "state": False,
+                    "message": "链接未携带 file_id，请重新生成 STRM 文件",
+                },
+                400,
+            )
+        if not md5 or not size:
+            return JSONResponse(
+                {"state": False, "message": "缺少 md5 或 size 参数"}, 400
+            )
+
+        user_agent = request.headers.get("User-Agent") or ""
+        logger.debug(f"【302跳转服务】获取到客户端UA: {user_agent}")
 
         try:
-            user_agent = request.headers.get("User-Agent") or b""
-            logger.debug(f"【302跳转服务】获取到客户端UA: {user_agent}")
-            resp = self._client.download_info(
-                payload,
-                base_url="",
-                async_=False,
-                headers={"User-Agent": user_agent},
+            url = self.fetch_download_url(
+                name=name,
+                size=size,
+                md5=md5,
+                s3_key_flag=s3_key_flag,
+                file_id=file_id,
+                user_agent=user_agent,
             )
-            check_response(resp)
-            url = resp["data"]["DownloadUrl"]
-            logger.info(f"【302跳转服务】获取 123 下载地址成功: {url}")
         except Exception as e:
             logger.error(f"【302跳转服务】获取 123 下载地址失败: {e}")
-            return JSONResponse(f"【302跳转服务】获取 123 下载地址失败: {e}")
+            return JSONResponse(
+                {"state": False, "message": f"获取 123 下载地址失败: {e}"}, 500
+            )
 
+        logger.info(f"【302跳转服务】获取 123 下载地址成功: {url}")
         return RedirectResponse(url, 302)
 
     @eventmanager.register(EventType.TransferComplete)
@@ -1786,10 +1828,11 @@ class P123StrmHelper(_PluginBase):
             return
 
         if (
-            not item_dest_info["FileName"]
-            or not item_dest_info["Size"]
-            or not item_dest_info["Etag"]
-            or not item_dest_info["S3KeyFlag"]
+            not item_dest_info.get("FileName")
+            or not item_dest_info.get("Size")
+            or not item_dest_info.get("Etag")
+            or not item_dest_info.get("S3KeyFlag")
+            or not item_dest_info.get("FileId")
         ):
             logger.error(
                 f"【监控整理STRM生成】{item_dest_name} 缺失必要文件信息，无法生成 STRM 文件: {item_dest_info}"
@@ -1798,9 +1841,10 @@ class P123StrmHelper(_PluginBase):
 
         strm_url = (
             f"{self.moviepilot_address.rstrip('/')}/api/v1/plugin/P123StrmHelper/redirect_url"
-            f"?apikey={settings.API_TOKEN}&name={item_dest_info['FileName']}"
+            f"?apikey={settings.API_TOKEN}&name={quote(item_dest_info['FileName'])}"
             f"&size={item_dest_info['Size']}&md5={item_dest_info['Etag']}"
-            f"&s3_key_flag={item_dest_info['S3KeyFlag']}"
+            f"&s3_key_flag={quote(item_dest_info['S3KeyFlag'])}"
+            f"&file_id={item_dest_info['FileId']}"
         )
 
         status, strm_target_path = generate_strm_files(
