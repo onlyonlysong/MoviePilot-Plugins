@@ -798,10 +798,13 @@ class Api:
                 url = await servicer.redirect.get_share_downurl(
                     share_code, receive_code, id, user_agent
                 )
-                logger.info(f"【302跳转服务】获取 115 下载地址成功: {url}")
+                logger.debug(
+                    f"【302跳转服务】返回 115 分享下载地址: "
+                    f"{share_code} {id} {url['file_name']}"
+                )
             except Exception as e:
                 error_message = f"获取 115 分享下载地址失败: {e}"
-                logger.error(f"【302跳转服务】{error_message}")
+                logger.error(f"【302跳转服务】{error_message}", exc_info=True)
                 return Api._create_error_response(
                     error_message, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
@@ -825,12 +828,13 @@ class Api:
                     url = await servicer.redirect.get_downurl_open(
                         pickcode.lower(), user_agent
                     )
-                logger.info(
-                    f"【302跳转服务】获取 115 下载地址成功: {url} {url['file_name']}"  # pylint: disable=E1126
+                logger.debug(
+                    f"【302跳转服务】返回 115 下载地址: "
+                    f"{pickcode.lower()} {url['file_name']}"  # pylint: disable=E1126
                 )
             except Exception as e:
                 error_message = f"获取 115 下载地址失败: {e}"
-                logger.error(f"【302跳转服务】{error_message}")
+                logger.error(f"【302跳转服务】{error_message}", exc_info=True)
                 return Api._create_error_response(
                     error_message, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
