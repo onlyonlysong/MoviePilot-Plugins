@@ -33,6 +33,70 @@ from app.utils.system import SystemUtils
 
 from .tool import P123AutoClient
 
+RECEIVE_PATH_NAME = "我的秒传"
+
+_fast_upload_cache: TTLCache = TTLCache(maxsize=2048, ttl=30 * 60)
+_fast_upload_lock: Lock = Lock()
+
+_download_url_cache: TTLCache = TTLCache(maxsize=1024, ttl=10 * 60)
+_download_url_lock: Lock = Lock()
+
+
+@cached(
+    cache=_fast_upload_cache,
+    key=lambda client, name, size, md5: hashkey(md5, size),
+    lock=_fast_upload_lock,
+)
+def fast_upload_to_receive_path(
+    client: P123AutoClient, name: str, size: int, md5: str
+) -> Tuple[int, str]:
+    """
+    将文件秒传到本账号的「我的秒传」目录
+
+    分享文件位于分享者网盘，其 FileId 与 S3KeyFlag 在本账号下不可用，
+    需按 MD5 与文件大小秒传一份到本账号后才能取到直链
+
+    :param client (P123AutoClient): 123 云盘客户端
+    :param name (str): 文件名，仅用于日志
+    :param size (int): 文件大小
+    :param md5 (str): 文件 MD5
+
+    :return Tuple: 本账号下的文件 ID 与 S3KeyFlag
+
+    :raises ValueError: 秒传未命中，网盘中不存在相同 MD5 与大小的文件
+    """
+    resp = client.fs_mkdir(RECEIVE_PATH_NAME)
+    check_response(resp)
+    parent_id = resp["data"]["Info"]["FileId"]
+
+    resp = client.upload_file_fast(
+        file_md5=md5,
+        file_name=f"{md5}-{size}",
+        file_size=size,
+        parent_id=parent_id,
+        # 文件名由 MD5 与大小唯一确定，重复转存时覆盖同名文件，避免副本堆积
+        duplicate=1,
+    )
+    check_response(resp)
+    info = resp["data"]["Info"]
+    file_id = int(info.get("FileId") or info.get("FileID") or 0)
+    if not file_id:
+        raise ValueError("秒传未命中，网盘中不存在相同 MD5 与大小的文件")
+    logger.info(f"【秒传转存】{name} 转存到 /{RECEIVE_PATH_NAME} 成功: {file_id}")
+    return file_id, info.get("S3KeyFlag") or ""
+
+
+def clear_fast_upload_cache() -> None:
+    """
+    清空秒传转存与直链缓存
+
+    「我的秒传」目录被清空后，缓存内的文件 ID 与直链均已失效，必须一并丢弃
+    """
+    with _fast_upload_lock:
+        _fast_upload_cache.clear()
+    with _download_url_lock:
+        _download_url_cache.clear()
+
 
 class MediaInfoDownloader:
     """
@@ -352,6 +416,7 @@ class ShareStrmHelper:
         self.server_address = server_address.rstrip("/")
         self._mediainfodownloader = MediaInfoDownloader(client=self.client)
         self.download_mediainfo_list = []
+        self.mediainfo_transfer_fail_list: List = []
 
     def has_prefix(self, full_path, prefix_path):
         """
@@ -374,9 +439,9 @@ class ShareStrmHelper:
         """
         获取分享文件，生成 STRM
         """
-        logger.warning(
-            "【分享STRM生成】分享文件不在本账号网盘中，生成的 STRM 无法直接播放，"
-            "需先将分享转存到本账号网盘再使用全量同步生成 STRM"
+        logger.info(
+            f"【分享STRM生成】分享文件不在本账号网盘中，播放时会先秒传到 /{RECEIVE_PATH_NAME} "
+            "目录再获取直链，可在清理页配置定期清空该目录"
         )
         for item in share_iterdir(
             client=self.client,
@@ -407,13 +472,28 @@ class ShareStrmHelper:
             try:
                 if self.auto_download_mediainfo:
                     if file_path.suffix in self.download_mediaext:
+                        try:
+                            file_id, s3_key_flag = fast_upload_to_receive_path(
+                                client=self.client,
+                                name=item["FileName"],
+                                size=int(item["Size"]),
+                                md5=item["Etag"],
+                            )
+                        except Exception as e:
+                            logger.error(
+                                "【分享STRM生成】%s 秒传转存失败，无法下载该文件: %s",
+                                item["FileName"],
+                                e,
+                            )
+                            self.mediainfo_transfer_fail_list.append(str(file_path))
+                            continue
                         self.download_mediainfo_list.append(
                             [
                                 {
                                     "Etag": item["Etag"],
-                                    "FileID": int(item["FileId"]),
+                                    "FileID": file_id,
                                     "FileName": item["FileName"],
-                                    "S3KeyFlag": item["S3KeyFlag"],
+                                    "S3KeyFlag": s3_key_flag,
                                     "Size": int(item["Size"]),
                                 },
                                 str(file_path),
@@ -430,12 +510,12 @@ class ShareStrmHelper:
 
                 new_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                # 分享文件的 FileId 属于分享者网盘，本账号下查不到，写入反而可能命中同 ID 的其他文件
+                # 分享文件的 FileId 与 S3KeyFlag 属于分享者网盘，在本账号下不可用
+                # 只写 md5 与 size，由 302 接口在播放时秒传到本账号后再取直链
                 strm_url = (
                     f"{self.server_address}/api/v1/plugin/P123StrmHelper/redirect_url"
                     f"?apikey={settings.API_TOKEN}&name={quote(item['FileName'])}"
                     f"&size={item['Size']}&md5={item['Etag']}"
-                    f"&s3_key_flag={quote(item['S3KeyFlag'])}"
                 )
 
                 with open(new_file_path, "w", encoding="utf-8") as file:
@@ -459,6 +539,8 @@ class ShareStrmHelper:
                 downloads_list=self.download_mediainfo_list
             )
         )
+        self.mediainfo_fail_count += len(self.mediainfo_transfer_fail_list)
+        self.mediainfo_fail_dict.extend(self.mediainfo_transfer_fail_list)
         if self.strm_fail_dict:
             for path, error in self.strm_fail_dict.items():
                 logger.warn(f"【分享STRM生成】{path} 生成错误原因: {error}")
@@ -486,7 +568,7 @@ class P123StrmHelper(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/DDSRem-Dev/MoviePilot-Plugins/main/icons/P123Disk.png"
     # 插件版本
-    plugin_version = "1.1.7"
+    plugin_version = "1.1.8"
     # 插件作者
     plugin_author = "DDSRem"
     # 作者主页
@@ -677,8 +759,11 @@ class P123StrmHelper(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         """
         BASE_URL: {server_url}/api/v1/plugin/P123StrmHelper/redirect_url?apikey={APIKEY}
-        file_id 为必需参数，且文件必须存在于本账号网盘中
+        0. 文件在本账号网盘中，携带 file_id
             url: ${BASE_URL}&name={name}&size={size}&md5={md5}&s3_key_flag={s3_key_flag}&file_id={file_id}
+        1. 文件不在本账号网盘中（分享来源），不携带 file_id
+           会先秒传到本账号的 "/我的秒传" 目录下，名字为 f"{md5}-{size}" 的文件，然后再获取下载链接
+            url: ${BASE_URL}&name={name}&size={size}&md5={md5}
         """
         return [
             {
@@ -1122,6 +1207,10 @@ class P123StrmHelper(_PluginBase):
                             {
                                 "component": "div",
                                 "text": "同时填写分享链接，分享码和分享密码时，优先读取分享链接",
+                            },
+                            {
+                                "component": "div",
+                                "text": "分享文件不在本账号网盘中，播放时会先秒传一份到 /我的秒传 目录再获取直链，可在清理页配置定期清空该目录",
                             },
                         ],
                     },
@@ -1631,11 +1720,11 @@ class P123StrmHelper(_PluginBase):
         logger.info(f"【媒体刮削】{item_name} 刮削元数据完成")
 
     @cached(
-        cache=TTLCache(maxsize=1024, ttl=10 * 60),
+        cache=_download_url_cache,
         key=lambda self, name, size, md5, s3_key_flag, file_id, user_agent: hashkey(
             file_id, md5, size, s3_key_flag, user_agent
         ),
-        lock=Lock(),
+        lock=_download_url_lock,
     )
     def fetch_download_url(
         self,
@@ -1687,22 +1776,25 @@ class P123StrmHelper(_PluginBase):
         """
         123云盘302跳转
         """
-        if not file_id:
-            logger.error(
-                f"【302跳转服务】{name} 链接未携带 file_id，请重新生成 STRM 文件；"
-                "分享来源的 STRM 需先将文件转存到本账号网盘后再生成"
-            )
-            return JSONResponse(
-                {
-                    "state": False,
-                    "message": "链接未携带 file_id，请重新生成 STRM 文件",
-                },
-                400,
-            )
         if not md5 or not size:
             return JSONResponse(
                 {"state": False, "message": "缺少 md5 或 size 参数"}, 400
             )
+
+        if not file_id:
+            # 分享来源的文件不在本账号网盘中，先秒传一份换取本账号的 FileId 与 S3KeyFlag
+            try:
+                file_id, s3_key_flag = fast_upload_to_receive_path(
+                    client=self._client,
+                    name=name,
+                    size=size,
+                    md5=md5,
+                )
+            except Exception as e:
+                logger.error(f"【302跳转服务】转存 {name} 文件失败: {e}")
+                return JSONResponse(
+                    {"state": False, "message": f"转存 {name} 文件失败: {e}"}, 500
+                )
 
         user_agent = request.headers.get("User-Agent") or ""
         logger.debug(f"【302跳转服务】获取到客户端UA: {user_agent}")
@@ -2060,7 +2152,7 @@ class P123StrmHelper(_PluginBase):
             logger.info("【我的秒传清理】开始清理我的秒传")
             _storagechain = StorageChain()
             fileitem = _storagechain.get_file_item(
-                storage="123云盘", path=Path("/我的秒传")
+                storage="123云盘", path=Path(f"/{RECEIVE_PATH_NAME}")
             )
             if not fileitem:
                 logger.info("【我的秒传清理】我的秒传目录为空，无需清理")
@@ -2069,6 +2161,7 @@ class P123StrmHelper(_PluginBase):
             logger.info(f"【我的秒传清理】我的秒传目录 ID 获取成功: {parent_id}")
             resp = self._client.fs_trash(parent_id, event="intoRecycle")
             check_response(resp)
+            clear_fast_upload_cache()
             logger.info("【我的秒传清理】我的秒传已清空")
         except Exception as e:
             logger.error(f"【我的秒传清理】清理我的秒传运行失败: {e}")
