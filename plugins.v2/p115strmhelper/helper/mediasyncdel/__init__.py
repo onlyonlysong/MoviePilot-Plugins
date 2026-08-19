@@ -1,5 +1,4 @@
-from os.path import abspath
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import localtime, strftime, time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -465,12 +464,23 @@ class MediaSyncDelHelper:
         matches = []
         for mapping in p115_library_path.splitlines():
             parts = [part.strip() for part in mapping.split("#", 2)]
-            if (
-                len(parts) == 3
-                and all(parts)
-                and path_index < len(parts)
-                and PathUtils.has_prefix(media_path, parts[path_index])
-            ):
+            if len(parts) != 3 or not all(parts) or path_index >= len(parts):
+                continue
+
+            if path_index == 0:
+                full_parts = PurePosixPath(media_path.replace("\\", "/")).parts
+                prefix_parts = PurePosixPath(parts[path_index].replace("\\", "/")).parts
+                is_match = full_parts[: len(prefix_parts)] == prefix_parts
+            else:
+                try:
+                    Path(media_path).resolve(strict=False).relative_to(
+                        Path(parts[path_index]).resolve(strict=False)
+                    )
+                    is_match = True
+                except (OSError, RuntimeError, ValueError):
+                    is_match = False
+
+            if is_match:
                 matches.append(parts)
         return matches
 
@@ -500,8 +510,10 @@ class MediaSyncDelHelper:
         )
         symlink_paths = []
         for parts in source_matches:
-            relative_path = Path(media_path).relative_to(parts[0])
-            local_path = Path(parts[1]) / relative_path
+            relative_path = PurePosixPath(media_path.replace("\\", "/")).relative_to(
+                PurePosixPath(parts[0].replace("\\", "/"))
+            )
+            local_path = Path(parts[1]).joinpath(*relative_path.parts)
             if local_path.is_symlink():
                 symlink_paths.append(local_path)
 
@@ -518,11 +530,8 @@ class MediaSyncDelHelper:
 
         symlink_path = unique_symlink_paths[0]
         try:
-            link_target = symlink_path.readlink()
-            if not link_target.is_absolute():
-                link_target = symlink_path.parent / link_target
-            link_target = Path(abspath(link_target))
-        except OSError as e:
+            link_target = symlink_path.resolve(strict=False)
+        except (OSError, RuntimeError) as e:
             logger.warning(
                 f"【同步删除】读取本地 STRM 软链接 {symlink_path} 失败，"
                 f"已跳过删除以避免误删: {e}"
@@ -543,8 +552,14 @@ class MediaSyncDelHelper:
             return None, True, symlink_path
 
         target_parts = target_matches[0]
-        relative_target = link_target.relative_to(target_parts[1])
-        resolved_media_path = str(Path(target_parts[0]) / relative_target)
+        relative_target = link_target.relative_to(
+            Path(target_parts[1]).resolve(strict=False)
+        )
+        resolved_media_path = str(
+            PurePosixPath(target_parts[0].replace("\\", "/")).joinpath(
+                *relative_target.parts
+            )
+        )
         logger.info(
             f"【同步删除】路径追踪：Emby Item Path={media_path}，"
             f"本地软链接={symlink_path}，软链接目标={link_target}，"
