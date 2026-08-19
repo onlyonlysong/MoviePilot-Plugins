@@ -62,7 +62,7 @@ class EmbyReverseProxy(_PluginBase):
         "Emby 302 反向代理，自动代理 HTTP 链接，跳转最终地址，支持外部播放器调用。"
     )
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/refs/heads/main/icons/Emby_A.png"
-    plugin_version = "0.2.5"
+    plugin_version = "0.2.6"
     plugin_author = "DDSRem"
     author_url = "https://github.com/DDSRem"
     plugin_config_prefix = "embyreverseproxy_"
@@ -266,7 +266,10 @@ class EmbyReverseProxy(_PluginBase):
                                     "label": "媒体源隐藏前缀（每行一个）",
                                     "rows": 3,
                                     "placeholder": "http://host:3000/api/.../redirect_url",
-                                    "hint": "留空关闭。填入媒体源 URL 开头要隐藏的完整部分；匹配后仅展示并解码剩余路径，不影响播放和探测",
+                                    "hint": (
+                                        "留空关闭。匹配后优先展示并解码 file_name 参数，"
+                                        "否则展示并解码剩余路径；不影响播放和探测"
+                                    ),
                                     "persistent-hint": True,
                                 },
                             }
