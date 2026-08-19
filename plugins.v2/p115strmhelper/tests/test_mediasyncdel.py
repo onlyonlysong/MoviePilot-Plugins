@@ -7,7 +7,8 @@ MediaSyncDelHelper 测试模块
 import importlib
 import sys
 from pathlib import Path
-from types import ModuleType
+from tempfile import TemporaryDirectory
+from types import ModuleType, SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
@@ -61,3 +62,278 @@ class TestMediaSyncDelHelper(TestCase):
 
         self.assertEqual(result, "iso")
         helper.storagechain.get_file_item.assert_not_called()
+
+    def test_resolve_strm_symlink_path_supports_absolute_target(self) -> None:
+        """
+        绝对软链接目标唯一匹配 MoviePilot 路径时切换到对应映射
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            target_root = root / "linshi"
+            source_root.mkdir()
+            target_root.mkdir()
+            target_path = target_root / "movie.strm"
+            target_path.write_text("https://example.com/movie", encoding="utf-8")
+            (source_root / "movie.strm").symlink_to(target_path)
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载"
+            )
+
+            result = helper._MediaSyncDelHelper__resolve_strm_symlink_path(
+                "/emby-media/movie.strm", mappings
+            )
+
+        self.assertEqual(
+            result,
+            ("/emby-linshi/movie.strm", True, source_root / "movie.strm"),
+        )
+
+    def test_resolve_strm_symlink_path_supports_relative_target(self) -> None:
+        """
+        相对软链接目标按软链接父目录转换为绝对路径
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            source_dir = source_root / "电影"
+            target_root = root / "linshi"
+            target_dir = target_root / "电影"
+            source_dir.mkdir(parents=True)
+            target_dir.mkdir(parents=True)
+            target_path = target_dir / "movie.strm"
+            target_path.write_text("https://example.com/movie", encoding="utf-8")
+            (source_dir / "movie.strm").symlink_to(Path("../../linshi/电影/movie.strm"))
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载"
+            )
+
+            result = helper._MediaSyncDelHelper__resolve_strm_symlink_path(
+                "/emby-media/电影/movie.strm", mappings
+            )
+
+        self.assertEqual(
+            result,
+            ("/emby-linshi/电影/movie.strm", True, source_dir / "movie.strm"),
+        )
+
+    def test_resolve_strm_symlink_path_rejects_ambiguous_target(self) -> None:
+        """
+        软链接目标匹配多条路径映射时阻止同步删除
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            target_root = root / "linshi"
+            source_root.mkdir()
+            target_root.mkdir()
+            target_path = target_root / "movie.strm"
+            target_path.write_text("https://example.com/movie", encoding="utf-8")
+            (source_root / "movie.strm").symlink_to(target_path)
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载\n"
+                f"/emby-other#{target_root}#/emby/其他目录"
+            )
+
+            result = helper._MediaSyncDelHelper__resolve_strm_symlink_path(
+                "/emby-media/movie.strm", mappings
+            )
+
+        self.assertEqual(result, (None, True, source_root / "movie.strm"))
+
+    def test_resolve_strm_symlink_path_ignores_regular_and_hardlink_files(
+        self,
+    ) -> None:
+        """
+        普通 STRM 文件和硬链接保持现有路径映射逻辑
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir) / "media"
+            source_root.mkdir()
+            regular_path = source_root / "regular.strm"
+            regular_path.write_text("https://example.com/movie", encoding="utf-8")
+            hardlink_path = source_root / "hardlink.strm"
+            hardlink_path.hardlink_to(regular_path)
+            mappings = f"/emby-media#{source_root}#/emby/整理完成"
+
+            regular_result = helper._MediaSyncDelHelper__resolve_strm_symlink_path(
+                "/emby-media/regular.strm", mappings
+            )
+            hardlink_result = helper._MediaSyncDelHelper__resolve_strm_symlink_path(
+                "/emby-media/hardlink.strm", mappings
+            )
+
+        self.assertEqual(
+            regular_result,
+            ("/emby-media/regular.strm", False, None),
+        )
+        self.assertEqual(
+            hardlink_result,
+            ("/emby-media/hardlink.strm", False, None),
+        )
+
+    def test_sync_del_by_webhook_uses_symlink_target_mapping(self) -> None:
+        """
+        Webhook 同步删除将软链接目标映射传入统一删除流程
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        sync_del = Mock(return_value={"deleted": True})
+        helper._MediaSyncDelHelper__sync_del = sync_del
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            target_root = root / "linshi"
+            source_root.mkdir()
+            target_root.mkdir()
+            target_path = target_root / "movie.strm"
+            target_path.write_text("https://example.com/movie", encoding="utf-8")
+            symlink_path = source_root / "movie.strm"
+            symlink_path.symlink_to(target_path)
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载"
+            )
+            event_data = SimpleNamespace(
+                event="deep.delete",
+                item_type="Series",
+                item_name="测试剧集",
+                item_path="/emby-media/movie.strm",
+                tmdb_id=123,
+                season_id=None,
+                episode_id=None,
+                json_object={"Item": {"Container": "mkv"}},
+            )
+
+            helper.sync_del_by_webhook(
+                event_data=event_data,
+                enabled=True,
+                notify=False,
+                del_source=False,
+                delete_symlink=True,
+                p115_library_path=mappings,
+                p115_force_delete_files=True,
+            )
+
+            self.assertFalse(symlink_path.exists())
+            self.assertFalse(symlink_path.is_symlink())
+            self.assertTrue(target_path.exists())
+
+        sync_del.assert_called_once()
+        self.assertEqual(
+            sync_del.call_args.kwargs["media_path"],
+            "/emby-linshi/movie.strm",
+        )
+        self.assertTrue(sync_del.call_args.kwargs["symlink_detected"])
+
+    def test_sync_del_by_webhook_keeps_symlink_when_disabled(self) -> None:
+        """
+        关闭软链接删除开关时保留本地链接
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        helper._MediaSyncDelHelper__sync_del = Mock(return_value={"deleted": True})
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            target_root = root / "linshi"
+            source_root.mkdir()
+            target_root.mkdir()
+            target_path = target_root / "movie.strm"
+            target_path.write_text("https://example.com/movie", encoding="utf-8")
+            symlink_path = source_root / "movie.strm"
+            symlink_path.symlink_to(target_path)
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载"
+            )
+            event_data = SimpleNamespace(
+                event="deep.delete",
+                item_type="Series",
+                item_name="测试剧集",
+                item_path="/emby-media/movie.strm",
+                tmdb_id=123,
+                season_id=None,
+                episode_id=None,
+                json_object={"Item": {"Container": "mkv"}},
+            )
+
+            helper.sync_del_by_webhook(
+                event_data=event_data,
+                enabled=True,
+                notify=False,
+                del_source=False,
+                delete_symlink=False,
+                p115_library_path=mappings,
+                p115_force_delete_files=True,
+            )
+
+            self.assertTrue(symlink_path.is_symlink())
+            self.assertTrue(target_path.exists())
+
+    def test_sync_del_by_webhook_skips_ambiguous_symlink_target(self) -> None:
+        """
+        Webhook 遇到目标映射不唯一的软链接时不进入删除流程
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        sync_del = Mock(return_value={})
+        helper._MediaSyncDelHelper__sync_del = sync_del
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            target_root = root / "linshi"
+            source_root.mkdir()
+            target_root.mkdir()
+            target_path = target_root / "movie.strm"
+            target_path.write_text("https://example.com/movie", encoding="utf-8")
+            symlink_path = source_root / "movie.strm"
+            symlink_path.symlink_to(target_path)
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载\n"
+                f"/emby-other#{target_root}#/emby/其他目录"
+            )
+            event_data = SimpleNamespace(
+                event="deep.delete",
+                item_type="Series",
+                item_name="测试剧集",
+                item_path="/emby-media/movie.strm",
+                tmdb_id=123,
+                season_id=None,
+                episode_id=None,
+                json_object={"Item": {"Container": "mkv"}},
+            )
+
+            result = helper.sync_del_by_webhook(
+                event_data=event_data,
+                enabled=True,
+                notify=False,
+                del_source=False,
+                delete_symlink=True,
+                p115_library_path=mappings,
+                p115_force_delete_files=True,
+            )
+
+            self.assertTrue(symlink_path.is_symlink())
+
+        self.assertIsNone(result)
+        sync_del.assert_not_called()
