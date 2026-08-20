@@ -337,3 +337,274 @@ class TestMediaSyncDelHelper(TestCase):
 
         self.assertIsNone(result)
         sync_del.assert_not_called()
+
+    def test_sync_del_by_webhook_expands_directory_strm_files(self) -> None:
+        """
+        Webhook 删除目录时递归解析普通 STRM 和软链接 STRM
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        sync_del = Mock(return_value={"deleted": True})
+        helper._MediaSyncDelHelper__sync_del = sync_del
+        helper._MediaSyncDelHelper__get_p115_media_suffix = Mock(return_value="mkv")
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "media"
+            media_directory = source_root / "测试剧集"
+            season_directory = media_directory / "Season 01"
+            target_root = root / "linshi"
+            target_directory = target_root / "测试剧集"
+            season_directory.mkdir(parents=True)
+            target_directory.mkdir(parents=True)
+
+            regular_path = season_directory / "S01E01.strm"
+            regular_path.write_text("https://example.com/episode/1", encoding="utf-8")
+            target_path = target_directory / "S01E02.strm"
+            target_path.write_text("https://example.com/episode/2", encoding="utf-8")
+            symlink_path = season_directory / "S01E02.STRM"
+            symlink_path.symlink_to(target_path)
+            mappings = (
+                f"/emby-media#{source_root}#/emby/整理完成\n"
+                f"/emby-linshi#{target_root}#/emby/临时下载"
+            )
+            event_data = SimpleNamespace(
+                event="deep.delete",
+                item_type="Series",
+                item_name="测试剧集",
+                item_path="/emby-media/测试剧集",
+                tmdb_id=123,
+                season_id=None,
+                episode_id=None,
+                json_object={"Item": {"Container": "folder"}},
+            )
+
+            helper.sync_del_by_webhook(
+                event_data=event_data,
+                enabled=True,
+                notify=False,
+                del_source=False,
+                delete_symlink=True,
+                p115_library_path=mappings,
+                p115_force_delete_files=True,
+            )
+
+            self.assertTrue(regular_path.exists())
+            self.assertFalse(symlink_path.exists())
+            self.assertTrue(target_path.exists())
+
+        self.assertEqual(sync_del.call_count, 2)
+        calls_by_path = {
+            call.kwargs["media_path"]: call.kwargs for call in sync_del.call_args_list
+        }
+        self.assertEqual(
+            set(calls_by_path),
+            {
+                "/emby-media/测试剧集/Season 01/S01E01.strm",
+                "/emby-linshi/测试剧集/S01E02.strm",
+            },
+        )
+        self.assertFalse(
+            calls_by_path["/emby-media/测试剧集/Season 01/S01E01.strm"][
+                "symlink_detected"
+            ]
+        )
+        self.assertTrue(
+            calls_by_path["/emby-linshi/测试剧集/S01E02.strm"]["symlink_detected"]
+        )
+        self.assertTrue(all(call["exact_path_only"] for call in calls_by_path.values()))
+
+    def test_expand_strm_directory_paths_skips_missing_directory(self) -> None:
+        """
+        本地目录已不存在时不回退为网盘目录映射删除
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            mappings = f"/emby-media#{Path(temp_dir) / 'media'}#/emby/整理完成"
+            result = helper._MediaSyncDelHelper__expand_strm_directory_paths(
+                "/emby-media/测试剧集",
+                mappings,
+            )
+
+        self.assertEqual(result, ([], True))
+
+    def test_expand_strm_directory_paths_preserves_directory_prefix(self) -> None:
+        """
+        目录展开后的 STRM 路径保留 Emby 上报目录层级
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            source_root = Path(temp_dir) / "media"
+            season_directory = source_root / "测试剧集" / "Season 01"
+            season_directory.mkdir(parents=True)
+            (season_directory / "S01E01.strm").write_text(
+                "https://example.com/episode/1",
+                encoding="utf-8",
+            )
+            mappings = f"/emby-media#{source_root}#/emby/整理完成"
+
+            result = helper._MediaSyncDelHelper__expand_strm_directory_paths(
+                "/emby-media/测试剧集",
+                mappings,
+            )
+
+        self.assertEqual(
+            result,
+            (["/emby-media/测试剧集/Season 01/S01E01.strm"], True),
+        )
+
+    def test_expand_strm_directory_paths_keeps_media_file_path(self) -> None:
+        """
+        媒体文件路径不进入目录递归流程
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            mappings = f"/emby-media#{Path(temp_dir) / 'media'}#/emby/整理完成"
+            with patch.object(module.settings, "RMT_MEDIAEXT", [".mkv"]):
+                result = helper._MediaSyncDelHelper__expand_strm_directory_paths(
+                    "/emby-media/测试电影.mkv",
+                    mappings,
+                )
+
+        self.assertEqual(result, (["/emby-media/测试电影.mkv"], False))
+
+    def test_sync_del_uses_most_specific_overlapping_mapping(self) -> None:
+        """
+        重叠路径映射按最长媒体服务器前缀转换最终网盘路径
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        helper.transferhis = Mock()
+        helper.transferhis.get_by_dest.return_value = None
+        helper._MediaSyncDelHelper__delete_p115_files = Mock()
+        helper._save_sync_del_history = Mock()
+        parent_mapping = "/media#/local/media#/emby/整理完成"
+        child_mapping = "/media/TV#/local/media/TV#/emby/临时下载"
+
+        for mappings in (
+            f"{parent_mapping}\n{child_mapping}",
+            f"{child_mapping}\n{parent_mapping}",
+        ):
+            with self.subTest(mappings=mappings):
+                helper._MediaSyncDelHelper__delete_p115_files.reset_mock()
+                with patch.object(
+                    module.configer,
+                    "storage_module",
+                    "u115",
+                    create=True,
+                ):
+                    helper._MediaSyncDelHelper__sync_del(
+                        media_type="Series",
+                        media_name="测试剧集",
+                        media_path="/media/TV/show/S01E01.strm",
+                        tmdb_id=123,
+                        season_num=None,
+                        episode_num=None,
+                        media_suffix="mkv",
+                        p115_library_path=mappings,
+                        p115_force_delete_files=True,
+                        del_source=False,
+                        notify=False,
+                        exact_path_only=True,
+                    )
+
+                helper._MediaSyncDelHelper__delete_p115_files.assert_called_once_with(
+                    storage="u115",
+                    file_path="/emby/临时下载/show/S01E01.mkv",
+                    media_name="测试剧集",
+                )
+
+    def test_sync_del_skips_ambiguous_longest_mapping(self) -> None:
+        """
+        相同最长前缀指向不同网盘目录时阻止同步删除
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        sync_del = Mock(return_value={"deleted": True})
+        helper._MediaSyncDelHelper__sync_del = sync_del
+        mappings = (
+            "/media/TV#/local/media/TV#/emby/临时下载\n"
+            "/media/TV#/local/media/TV#/emby/其他目录"
+        )
+        event_data = SimpleNamespace(
+            event="deep.delete",
+            item_type="Episode",
+            item_name="测试剧集",
+            item_path="/media/TV/show/S01E01.strm",
+            tmdb_id=123,
+            season_id=1,
+            episode_id=1,
+            json_object={"Item": {"Container": "mkv"}},
+        )
+
+        result = helper.sync_del_by_webhook(
+            event_data=event_data,
+            enabled=True,
+            notify=False,
+            del_source=False,
+            delete_symlink=False,
+            p115_library_path=mappings,
+            p115_force_delete_files=True,
+        )
+
+        self.assertIsNone(result)
+        sync_del.assert_not_called()
+
+    def test_expand_directory_uses_most_specific_overlapping_mapping(self) -> None:
+        """
+        目录展开在父子映射重叠时选择最长媒体服务器前缀
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+
+        with TemporaryDirectory() as temp_dir:
+            local_root = Path(temp_dir) / "media"
+            show_directory = local_root / "TV" / "show"
+            show_directory.mkdir(parents=True)
+            (show_directory / "S01E01.strm").write_text(
+                "https://example.com/episode/1",
+                encoding="utf-8",
+            )
+            mappings = (
+                f"/media#{local_root}#/emby/整理完成\n"
+                f"/media/TV#{local_root / 'TV'}#/emby/临时下载"
+            )
+
+            result = helper._MediaSyncDelHelper__expand_strm_directory_paths(
+                "/media/TV/show",
+                mappings,
+            )
+
+        self.assertEqual(result, (["/media/TV/show/S01E01.strm"], True))
+
+    def test_get_transfer_his_exact_path_avoids_series_wide_query(self) -> None:
+        """
+        目录展开后的 STRM 仅查询目标路径完全匹配的转移记录
+        """
+        module = _load_mediasyncdel_module()
+        helper = object.__new__(module.MediaSyncDelHelper)
+        transfer_history = SimpleNamespace(id=1)
+        helper.transferhis = Mock()
+        helper.transferhis.get_by_dest.return_value = transfer_history
+
+        _, result = helper._MediaSyncDelHelper__get_transfer_his(
+            media_type="Series",
+            media_name="测试剧集",
+            media_path="/emby/临时下载/测试剧集/S01E01.mkv",
+            tmdb_id=123,
+            season_num=None,
+            episode_num=None,
+            exact_path_only=True,
+        )
+
+        self.assertEqual(result, [transfer_history])
+        helper.transferhis.get_by_dest.assert_called_once_with(
+            "/emby/临时下载/测试剧集/S01E01.mkv"
+        )
+        helper.transferhis.get_by.assert_not_called()
