@@ -15,7 +15,7 @@ class RenameDictUtils:
     重命名字典工具类
     """
 
-    FFPROBE_TIMEOUT_SEC = 30
+    FFPROBE_TIMEOUT_SEC = 60
 
     _VIDEO_CODEC_MAP = {
         "h264": "H264",
@@ -666,6 +666,9 @@ class RenameDictUtils:
             "ffprobe",
             "-v",
             "error",
+            "-user_agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             "-print_format",
             "json",
             "-show_streams",

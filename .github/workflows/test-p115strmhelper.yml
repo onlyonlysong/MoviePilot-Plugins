@@ -59,6 +59,7 @@ jobs:
         with:
           repository: jxxghp/MoviePilot
           path: MoviePilot
+          ref: v2
 
       - name: Checkout MoviePilot resources
         uses: actions/checkout@v7

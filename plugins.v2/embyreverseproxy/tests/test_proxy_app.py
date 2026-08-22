@@ -65,9 +65,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
 
         for value, expected in values:
             with self.subTest(value=value):
-                self.assertEqual(
-                    _restore_media_source_path(value, PREFIXES), expected
-                )
+                self.assertEqual(_restore_media_source_path(value, PREFIXES), expected)
 
     def test_uses_longest_prefix(self) -> None:
         """
@@ -92,6 +90,20 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
             "/",
         )
 
+    def test_prefers_decoded_file_name_query_parameter(self) -> None:
+        """
+        验证命中前缀时优先展示已解码的 file_name 参数
+        """
+        value = (
+            f"{PREFIX}?pickcode=abc123&file_name="
+            "%E5%BD%B1%E7%89%87%E5%90%8D+%282024%29.BluRay.2160p.mkv"
+        )
+
+        self.assertEqual(
+            _restore_media_source_path(value, PREFIXES),
+            "影片名 (2024).BluRay.2160p.mkv",
+        )
+
     def test_leaves_unrelated_or_invalid_paths_unchanged(self) -> None:
         """
         验证无关或非法路径保持不变
@@ -101,6 +113,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
             "http://other:3000/custom/redirect/media/A.mp4",
             "https://moviepilot:3000/custom/redirect/media/A.mp4",
             "http://moviepilot:3001/custom/redirect/media/A.mp4",
+            ("http://other:3000/custom/redirect?file_name=%E5%BD%B1%E7%89%87.mkv"),
             f"{PREFIX}/media/%FF.mp4",
             f"{PREFIX}/media/%ZZ.mp4",
             "/media/A.mp4",
@@ -108,9 +121,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
 
         for value in values:
             with self.subTest(value=value):
-                self.assertEqual(
-                    _restore_media_source_path(value, PREFIXES), value
-                )
+                self.assertEqual(_restore_media_source_path(value, PREFIXES), value)
 
         port_zero_prefixes = _normalize_media_source_path_prefixes(
             ["http://moviepilot:0/base"]
@@ -144,9 +155,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
         masked_count = _mask_media_source_paths(payload, PREFIXES)
 
         self.assertEqual(masked_count, 1)
-        self.assertEqual(
-            payload["Path"], "http://moviepilot:3000/keep/item.strm"
-        )
+        self.assertEqual(payload["Path"], "http://moviepilot:3000/keep/item.strm")
         source = payload["Items"][0]["MediaSources"][0]
         self.assertEqual(source["Path"], "/media/A.mp4")
         self.assertEqual(source["DirectStreamUrl"], "/videos/1/stream")
@@ -163,9 +172,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
         payload = {"MediaSources": [{"Path": f"{PREFIX}/media/A.mp4"}]}
 
         self.assertEqual(_mask_media_source_paths(payload, []), 0)
-        self.assertEqual(
-            payload["MediaSources"][0]["Path"], f"{PREFIX}/media/A.mp4"
-        )
+        self.assertEqual(payload["MediaSources"][0]["Path"], f"{PREFIX}/media/A.mp4")
 
     async def test_masks_requested_media_sources_on_any_get_route(self) -> None:
         """
@@ -180,6 +187,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
             """
             模拟 Emby GET 客户端
             """
+
             @staticmethod
             def response(request: Request) -> Response:
                 """
@@ -189,9 +197,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
                     200,
                     headers={"etag": '"upstream"'},
                     json={
-                        "Items": [
-                            {"MediaSources": [{"Path": f"{PREFIX}/media/A.mp4"}]}
-                        ]
+                        "Items": [{"MediaSources": [{"Path": f"{PREFIX}/media/A.mp4"}]}]
                     },
                     request=request,
                 )
@@ -215,25 +221,19 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
                     )
                 return self.response(Request("GET", url))
 
-            def build_request(
-                self, method: str, url: str, **kwargs: Any
-            ) -> Request:
+            def build_request(self, method: str, url: str, **kwargs: Any) -> Request:
                 """
                 构造模拟上游请求
                 """
                 return Request(method, url, headers=kwargs.get("headers"))
 
-            async def send(
-                self, request: Request, **kwargs: Any
-            ) -> Response:
+            async def send(self, request: Request, **kwargs: Any) -> Response:
                 """
                 发送模拟上游请求
                 """
                 return self.response(request)
 
-            async def request(
-                self, method: str, url: str, **kwargs: Any
-            ) -> Response:
+            async def request(self, method: str, url: str, **kwargs: Any) -> Response:
                 """
                 发送模拟单项详情请求
                 """
@@ -250,9 +250,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
         app.state.http_client_no_follow = fake_client
 
         transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport, base_url="http://proxy"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://proxy") as client:
             params = {"Fields": "ProviderIds,MediaSources"}
             responses = (
                 await client.get("/Items", params=params),
@@ -263,12 +261,8 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
             passthrough = await client.get(
                 "/unlisted.json", params={"Fields": "ProviderIds"}
             )
-            redirect = await client.get(
-                "/redirect", params={"Fields": "MediaSources"}
-            )
-            plain = await client.get(
-                "/plain", params={"Fields": "MediaSources"}
-            )
+            redirect = await client.get("/redirect", params={"Fields": "MediaSources"})
+            plain = await client.get("/plain", params={"Fields": "MediaSources"})
             detail_redirect = await client.get(
                 "/emby/users/user-1/items/detail-redirect"
             )
@@ -285,9 +279,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
             f"{PREFIX}/media/A.mp4",
         )
         self.assertEqual(redirect.status_code, 302)
-        self.assertEqual(
-            redirect.headers["location"], "http://cdn.example/video.mp4"
-        )
+        self.assertEqual(redirect.headers["location"], "http://cdn.example/video.mp4")
         self.assertEqual(plain.text, "plain response")
         self.assertEqual(plain.headers["etag"], '"plain"')
         self.assertEqual(detail_redirect.status_code, 302)
@@ -304,14 +296,17 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
             media_source_path_prefixes=[PREFIX],
             pin_rules=[("/media", PREFIX)],
         )
+        strm_url = (
+            f"{PREFIX}?pickcode=abc123&file_name="
+            "%E5%BD%B1%E7%89%87%E5%90%8D+%282024%29.mkv"
+        )
 
         class FakeClient:
             """
             模拟 Emby PlaybackInfo 客户端
             """
-            async def request(
-                self, method: str, url: str, **kwargs: Any
-            ) -> Response:
+
+            async def request(self, method: str, url: str, **kwargs: Any) -> Response:
                 """
                 构造模拟 PlaybackInfo 响应
                 """
@@ -322,7 +317,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
                         "MediaSources": [
                             {
                                 "Id": "source-1",
-                                "Path": f"{PREFIX}/media/A.mp4",
+                                "Path": strm_url,
                                 "Protocol": "Http",
                                 "IsRemote": True,
                                 "Type": "Video",
@@ -344,9 +339,7 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
         app.state.http_client_follow = FakeClient()
 
         transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport, base_url="http://proxy"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://proxy") as client:
             display = await client.post(
                 "/Items/1/PlaybackInfo",
                 params={"IsPlayback": "false"},
@@ -358,23 +351,17 @@ class TestMediaSourcePathMasking(unittest.IsolatedAsyncioTestCase):
                 json={"DeviceProfile": {}},
             )
 
-        self.assertEqual(
-            display.json()["MediaSources"][0]["Path"], "/media/A.mp4"
-        )
-        self.assertEqual(
-            display.json()["MediaSources"][1]["Path"], "/media/B.mp4"
-        )
+        self.assertEqual(display.json()["MediaSources"][0]["Path"], "影片名 (2024).mkv")
+        self.assertEqual(display.json()["MediaSources"][1]["Path"], "/media/B.mp4")
         self.assertNotIn("etag", display.headers)
         self.assertEqual(
             playback.json()["MediaSources"][0]["Path"],
-            f"{PREFIX}/media/A.mp4",
+            strm_url,
         )
-        self.assertEqual(
-            playback.json()["MediaSources"][1]["Path"], "/media/B.mp4"
-        )
+        self.assertEqual(playback.json()["MediaSources"][1]["Path"], "/media/B.mp4")
         self.assertNotIn("etag", playback.headers)
         cached_sources = app.state.strm_source_cache["1"][0]
-        self.assertEqual(cached_sources["source-1"], f"{PREFIX}/media/A.mp4")
+        self.assertEqual(cached_sources["source-1"], strm_url)
         self.assertEqual(cached_sources["source-2"], f"{PREFIX}/B.mp4")
 
 

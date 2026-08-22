@@ -4,7 +4,7 @@ from hashlib import sha256
 from re import IGNORECASE, compile as re_compile, search as re_search, sub as re_sub
 from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -181,9 +181,7 @@ def _normalize_media_source_path_prefixes(prefixes: List[str]) -> List[str]:
     return sorted(result, key=lambda prefix: len(urlparse(prefix).path), reverse=True)
 
 
-def _restore_media_source_path(
-    url_or_path: str, prefixes: List[str]
-) -> str:
+def _restore_media_source_path(url_or_path: str, prefixes: List[str]) -> str:
     """
     移除媒体源 URL 中配置的隐藏前缀并还原文件路径
 
@@ -230,6 +228,9 @@ def _restore_media_source_path(
                 continue
         else:
             suffix = source.path
+        file_names = parse_qs(source.query).get("file_name")
+        if file_names:
+            return file_names[0]
         if suffix.startswith("/"):
             if re_search(r"%(?![0-9A-Fa-f]{2})", suffix):
                 return url_or_path
@@ -1079,10 +1080,9 @@ def create_app(
                 headers=_resp_headers_from_httpx(resp),
             )
 
-        mask_non_playback_paths = (
-            request.query_params.get("IsPlayback", "").lower()
-            in ("false", "0")
-        )
+        mask_non_playback_paths = request.query_params.get(
+            "IsPlayback", ""
+        ).lower() in ("false", "0")
 
         is_strm = _media_sources_indicate_strm(data)
         is_pin = _media_sources_match_pin_rules(data, pin_rules)
@@ -1286,7 +1286,6 @@ def create_app(
             status_code=resp.status_code,
             headers=resp_headers,
         )
-
 
     def _requests_media_sources(request: Request) -> bool:
         return any(

@@ -828,6 +828,9 @@ class ConfigManager(BaseModel):
     sync_del_enabled: bool = Field(default=False, description="同步删除开关")
     sync_del_notify: bool = Field(default=True, description="同步删除通知开关")
     sync_del_source: bool = Field(default=False, description="同步删除源文件")
+    sync_del_delete_symlink: bool = Field(
+        default=False, description="同步删除本地 STRM 软链接"
+    )
     sync_del_p115_library_path: Optional[str] = Field(
         default=None, description="115网盘媒体库路径映射"
     )
@@ -889,7 +892,7 @@ class ConfigManager(BaseModel):
         """
         返回 p115center 许可证
         """
-        return "51933384fd2a057f1c5bef76e62772aa1ac9c7fcd565a9c5ce05c6d50a59bee1"
+        return "0e75f9901b53ad40501b711d20e3ae102b869d88f4adfb8e7a966088973c4100"
 
     @property
     def plugin_aligo_path(self) -> Path:
